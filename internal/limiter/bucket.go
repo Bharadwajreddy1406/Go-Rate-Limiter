@@ -25,26 +25,38 @@ func NewBucket(config Config) *Bucket {
 }
 
 
-func (bucket *Bucket) refill() {
-	
+func (b *Bucket) refill() {
 	now := time.Now()
-	elapsed := now.Sub(bucket.LastRefillAt).Seconds()
-	tokensToAdd := int(elapsed * bucket.TokensPerSecond)
-	if tokensToAdd > 0 {
-		bucket.Tokens = min(bucket.Capacity, bucket.Tokens+tokensToAdd)
-		bucket.LastRefillAt = now
+
+	elapsed := now.Sub(b.LastRefillAt).Seconds()
+	tokensToAdd := int(elapsed * b.TokensPerSecond)
+
+	if tokensToAdd <= 0 {
+		return
 	}
+
+	b.Tokens = min(b.Capacity, b.Tokens+tokensToAdd)
+
+
+	refillDuration := time.Duration(
+		float64(tokensToAdd)/b.TokensPerSecond * float64(time.Second),
+	)
+
+	b.LastRefillAt = b.LastRefillAt.Add(refillDuration)
 }
 
-func (bucket *Bucket) Allow() bool {
-	bucket.mu.Lock()
-	defer bucket.mu.Unlock()
 
-	bucket.refill()
+func (b *Bucket) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	if bucket.Tokens > 0 {
-		bucket.Tokens--
-		return true
+	b.refill()
+
+	if b.Tokens <= 0 {
+		return false
 	}
-	return false
+
+	b.Tokens--
+
+	return true
 }

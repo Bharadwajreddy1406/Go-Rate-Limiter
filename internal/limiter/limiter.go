@@ -1,6 +1,8 @@
 package limiter
 
-import "sync"
+import (
+	"sync"
+)
 
 type RateLimiter struct {
 	config Config
@@ -22,4 +24,31 @@ func NewRateLimiter(config Config) (*RateLimiter, error) {
 	}
 
 	return rl, nil
+}
+
+func (rl *RateLimiter) getOrCreateBucket(key string) *Bucket {
+	rl.mu.RLock()
+	bucket, exists := rl.buckets[key]
+	rl.mu.RUnlock()
+
+	if exists {
+		return bucket
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	bucket, exists = rl.buckets[key]
+	if exists {
+		return bucket
+	}
+
+	bucket = NewBucket(rl.config)
+	rl.buckets[key] = bucket
+
+	return bucket
+}
+func (rl *RateLimiter) Allow(key string) bool {
+	bucket := rl.getOrCreateBucket(key)
+	return bucket.Allow()
 }
