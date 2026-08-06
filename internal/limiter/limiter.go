@@ -48,7 +48,19 @@ func (rl *RateLimiter) getOrCreateBucket(key string) *Bucket {
 
 	return bucket
 }
+
 func (rl *RateLimiter) Allow(key string) bool {
 	bucket := rl.getOrCreateBucket(key)
 	return bucket.Allow()
+}
+
+func (rl *RateLimiter) GetTokens(key string) int {
+	rl.mu.RLock()
+	bucket, exists := rl.buckets[key]
+	rl.mu.RUnlock()
+	if !exists {
+		return 0
+	}
+
+	return bucket.Tokens
 }

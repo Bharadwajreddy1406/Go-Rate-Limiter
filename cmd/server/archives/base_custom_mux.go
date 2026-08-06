@@ -14,10 +14,20 @@ package archives
 	
 // 	http.HandleFunc("/hello", SlashHandler)
 
-// 	fmt.Println("Server is running on port", "9090")
 
-// 	err := http.ListenAndServe(":9090", nil)
 
+// 	fmt.Println("Server is running on port", Port)
+// 	mux := http.NewServeMux()
+
+// 	server:= &http.Server{
+// 		Addr:    fmt.Sprintf(":%d", Port),
+// 		Handler: mux,
+// 	}
+
+// 	err := server.ListenAndServe()
+
+
+	
 // 	if err != nil {
 // 		fmt.Println("Error starting server:", err)
 // 	}
