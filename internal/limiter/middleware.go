@@ -1,8 +1,10 @@
 package limiter
 
 import (
-	"fmt"
+	"database/sql"
+	"log"
 	"net/http"
+	"strings"
 )
 
 type RateLimiterMiddleware struct {
@@ -10,8 +12,8 @@ type RateLimiterMiddleware struct {
 	next    http.Handler
 }
 
-func NewRateLimiterMiddleware(next http.Handler, config Config) (http.Handler, error) {
-	limiter, err := NewRateLimiter(config)
+func NewRateLimiterMiddleware(next http.Handler, db *sql.DB, config Config) (http.Handler, error) {
+	limiter, err := NewRateLimiter(db, config)
 
 	if err != nil {
 		return nil, err
@@ -24,14 +26,21 @@ func NewRateLimiterMiddleware(next http.Handler, config Config) (http.Handler, e
 }
 
 func (rtlm *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	if key == "" {
+		http.Error(w, "X-User-ID header is required", http.StatusBadRequest)
+		return
+	}
 
-	key := r.Header.Get("X-User-ID")
-	fmt.Printf(" User Id %s\n and tokens before %d\n", key, rtlm.limiter.GetTokens(key))
-	if !rtlm.limiter.Allow(key) {
+	allowed, err := rtlm.limiter.Allow(r.Context(), key)
+	if err != nil {
+		log.Printf("rate limiter: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 	rtlm.next.ServeHTTP(w, r)
-
-	fmt.Printf("User Id %s and Tokens After %d\n", key, rtlm.limiter.GetTokens(key))
 }

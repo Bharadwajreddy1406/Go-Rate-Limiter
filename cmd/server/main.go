@@ -3,12 +3,21 @@ package main
 import (
 	"fmt"
 	"net/http"
+
+	sqlitedb "rate-limiter/internal/sqlite"
 )
 
 func main() {
 	fmt.Println("Server is running on port", Port)
 
-	handler, err := registerMiddleware()
+	db, err := sqlitedb.Open()
+	if err != nil {
+		fmt.Println("Error opening database:", err)
+		return
+	}
+	defer db.Close()
+
+	handler, err := registerMiddleware(db)
 	if err != nil {
 		fmt.Println("Error registering middleware:", err)
 		return

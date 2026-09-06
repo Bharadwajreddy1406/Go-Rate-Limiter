@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 
@@ -14,7 +15,7 @@ func HelloHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "Hello World!")
 }
 
-func registerMiddleware() (http.Handler, error) {
+func registerMiddleware(db *sql.DB) (http.Handler, error) {
 	// Correct Steps to build a Middleware
 
 	// Create the router
@@ -31,7 +32,7 @@ func registerMiddleware() (http.Handler, error) {
 	// Wrap the router with middlewares
 
 	printMiddleware := logger.PrintMiddlewareHandler(mux)
-	rateLimiterMiddleware, err := limiter.NewRateLimiterMiddleware(printMiddleware, config)
+	rateLimiterMiddleware, err := limiter.NewRateLimiterMiddleware(printMiddleware, db, config)
 	if err != nil {
 		fmt.Println("Error creating rate limiter middleware:", err)
 		return nil, err
