@@ -10,19 +10,28 @@ import (
 )
 
 func HelloHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Inside")
-
 	fmt.Fprintln(w, "Hello World!")
+}
+
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ponytail: demo-only wildcard; restrict allowed origins before adding authentication.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "X-User-ID")
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", http.MethodGet)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func registerMiddleware(db *sql.DB) (http.Handler, error) {
 	// Correct Steps to build a Middleware
 
-	// Create the router
-	mux := http.NewServeMux()
-
-	// Register all routes
-	mux.HandleFunc("/hello", HelloHandler)
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/hello", HelloHandler)
 
 	config := limiter.Config{
 		Capacity:        100,
@@ -31,13 +40,15 @@ func registerMiddleware(db *sql.DB) (http.Handler, error) {
 
 	// Wrap the router with middlewares
 
-	printMiddleware := logger.PrintMiddlewareHandler(mux)
+	printMiddleware := logger.PrintMiddlewareHandler(apiMux)
 	rateLimiterMiddleware, err := limiter.NewRateLimiterMiddleware(printMiddleware, db, config)
 	if err != nil {
 		fmt.Println("Error creating rate limiter middleware:", err)
 		return nil, err
 	}
 
-	// Return the complete handler chain
-	return rateLimiterMiddleware, nil
+	mux := http.NewServeMux()
+	mux.Handle("/hello", cors(rateLimiterMiddleware))
+	mux.Handle("/", http.FileServer(http.Dir("web")))
+	return mux, nil
 }

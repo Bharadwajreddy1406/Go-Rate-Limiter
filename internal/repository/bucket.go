@@ -22,6 +22,18 @@ func NewBucketRepository(db *sql.DB, capacity int, tokensPerSecond float64) *Buc
 	}
 }
 
+func (r *BucketRepository) GetTokens(ctx context.Context, key string) (int, error) {
+	var tokens int
+	err := r.db.QueryRowContext(ctx, "SELECT tokens FROM buckets WHERE key = ?", key).Scan(&tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r.capacity, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read bucket tokens: %w", err)
+	}
+	return tokens, nil
+}
+
 func (r *BucketRepository) Allow(ctx context.Context, key string) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

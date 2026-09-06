@@ -9,7 +9,7 @@ import (
 )
 
 func TestRateLimiterStoresAndRefillsBucketsInSQLite(t *testing.T) {
-	db, err := sqlitedb.Open()
+	db, err := sqlitedb.OpenInMemory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +37,9 @@ func TestRateLimiterStoresAndRefillsBucketsInSQLite(t *testing.T) {
 	}
 	if tokens != 0 {
 		t.Fatalf("stored tokens = %d, want 0", tokens)
+	}
+	if got, err := limiter.GetTokens(ctx, "user-1"); err != nil || got != 0 {
+		t.Fatalf("GetTokens = %d, %v; want 0, nil", got, err)
 	}
 
 	_, err = db.Exec("UPDATE buckets SET last_refill_at = ? WHERE key = ?", time.Now().Add(-time.Second).UnixNano(), "user-1")

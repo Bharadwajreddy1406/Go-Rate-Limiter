@@ -32,6 +32,14 @@ func (rtlm *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	tokens, err := rtlm.limiter.GetTokens(r.Context(), key)
+	if err != nil {
+		log.Printf("rate limiter: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("rate limiter: user_id=%q tokens_before=%d", key, tokens)
+
 	allowed, err := rtlm.limiter.Allow(r.Context(), key)
 	if err != nil {
 		log.Printf("rate limiter: %v", err)
@@ -43,4 +51,11 @@ func (rtlm *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	rtlm.next.ServeHTTP(w, r)
+
+	tokens, err = rtlm.limiter.GetTokens(r.Context(), key)
+	if err != nil {
+		log.Printf("rate limiter: %v", err)
+		return
+	}
+	log.Printf("rate limiter: user_id=%q tokens_after=%d", key, tokens)
 }

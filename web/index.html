@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rate Limiter Demo</title>
+  </head>
+  <body>
+    <button id="request">Call /hello</button>
+    <pre id="result">Ready</pre>
+    <script>
+      const users = ["ramu", "remo", "aparichithudu"];
+      const result = document.querySelector("#result");
+
+      document.querySelector("#request").addEventListener("click", async () => {
+        const user = users[Math.floor(Math.random() * users.length)];
+        const response = await fetch("http://localhost:9090/hello", { headers: { "X-User-ID": user } });
+        if (response.status === 429) {
+          result.textContent = `${user} is rate limited. Try again later.`;
+          return;
+        }
+        result.textContent = `${user}: ${response.status} ${await response.text()}`;
+      });
+    </script>
+  </body>
+</html>

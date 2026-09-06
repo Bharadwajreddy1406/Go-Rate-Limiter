@@ -24,3 +24,7 @@ func NewRateLimiter(db *sql.DB, config Config) (*RateLimiter, error) {
 func (rl *RateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 	return rl.buckets.Allow(ctx, key)
 }
+
+func (rl *RateLimiter) GetTokens(ctx context.Context, key string) (int, error) {
+	return rl.buckets.GetTokens(ctx, key)
+}
