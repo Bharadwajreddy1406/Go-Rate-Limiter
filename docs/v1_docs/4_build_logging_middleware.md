@@ -1,180 +1,72 @@
-read [these](./write_these_before_you_read_this.md) instructions before you read this document.
+# V1: Logging Middleware
 
-I called it  PrintMiddleware 
+## Quick revision
 
----
+The v1 logger prints the request method/path before the route runs and prints the total duration after it returns.
 
-# Request Pipeline Setup
-
-## Overview
-
-The HTTP server should not know about routing, middleware, or business logic. It only needs a single `http.Handler`.
-
-Our job is to build a **handler chain** and give the outermost handler to the server.
-
----
-
-## Request Flow
-
-```text
-Client Request
-      │
-      ▼
-http.Server
-      │
-      ▼
-Middleware(s)
-      │
-      ▼
-ServeMux (Router)
-      │
-      ▼
-Matched Route Handler
-      │
-      ▼
-Response
-```
-
----
-
-# Step 1 — Create the Router
-
-Create a `ServeMux` that will hold all application routes.
+## The v1 implementation
 
 ```go
-mux := http.NewServeMux()
-```
+func (p *PrintMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    start := time.Now()
+    fmt.Printf("%s %s\n", r.Method, r.URL.Path)
 
-At this point, the router is empty.
+    defer func() {
+        fmt.Println("Request Duration:", time.Since(start))
+    }()
 
----
-
-# Step 2 — Register Routes
-
-Register all endpoints on the router.
-
-```go
-mux.HandleFunc("/hello", HelloHandler)
-mux.HandleFunc("/health", HealthHandler)
-```
-
-Conceptually, the router now maintains a routing table:
-
-```text
-/hello   -> HelloHandler
-/health  -> HealthHandler
-```
-
----
-
-# Step 3 — Wrap the Router with Middleware
-
-Middleware should wrap the router instead of modifying it.
-
-```go
-logging := logger.NewPrintMiddleware(mux)
-```
-
-The middleware stores the router as its `next` handler.
-
-```text
-Logging Middleware
-        │
-        ▼
-     ServeMux
-```
-
-Because `ServeMux` implements `http.Handler`, it can be wrapped by any middleware that accepts an `http.Handler`.
-
----
-
-# Step 4 — Give the Final Handler to the Server
-
-The server receives only the outermost handler.
-
-```go
-server := &http.Server{
-    Addr:    ":9090",
-    Handler: logging,
+    p.next.ServeHTTP(w, r)
 }
 ```
 
-The server does **not** know whether it is talking to:
+`defer` schedules the duration log for the moment `ServeHTTP` returns. It makes the "after" action stay paired with the "before" action.
 
-* a router
-* a middleware
-* a custom handler
-
-It simply invokes:
-
-```go
-handler.ServeHTTP(w, r)
+```mermaid
+sequenceDiagram
+    participant M as PrintMiddleware
+    participant N as next handler
+    M->>M: record start time and print method/path
+    M->>N: next.ServeHTTP
+    N-->>M: return
+    M->>M: deferred duration log runs
 ```
 
----
-
-# Complete Flow
+## Constructor
 
 ```go
-func buildHandler() http.Handler {
-    mux := http.NewServeMux()
-
-    // Register routes
-    mux.HandleFunc("/hello", HelloHandler)
-    mux.HandleFunc("/health", HealthHandler)
-
-    // Wrap with middleware
-    logging := logger.NewPrintMiddleware(mux)
-
-    return logging
+func PrintMiddlewareHandler(next http.Handler) *PrintMiddleware {
+    return &PrintMiddleware{next: next}
 }
 ```
 
-```go
-func main() {
-    handler := buildHandler()
+It takes a handler and returns a new handler, which is the usual middleware composition pattern.
 
-    server := &http.Server{
-        Addr:    ":9090",
-        Handler: handler,
-    }
-
-    server.ListenAndServe()
-}
-```
-
----
-
-# Why This Design?
-
-* The router is responsible only for route matching.
-* Middleware is responsible only for cross-cutting concerns (logging, authentication, rate limiting, recovery, etc.).
-* The server is responsible only for accepting HTTP requests and invoking the supplied `http.Handler`.
-* Each layer has a single responsibility, making the application modular and easy to extend.
-
----
-
-# Scaling the Middleware Chain
-
-As new middleware is added, each one wraps the previous handler.
+## Example output
 
 ```text
-http.Server
-      │
-      ▼
-Rate Limiter
-      │
-      ▼
-Authentication
-      │
-      ▼
-Logging
-      │
-      ▼
-ServeMux
-      │
-      ▼
-Route Handler
+========== Incoming Request ==========
+GET /hello
+======================================
+Inside
+Request Duration: 42.1µs
 ```
 
-Every middleware implements the same `http.Handler` interface, allowing them to be composed into a pipeline without changing the server or the route handlers.
+## Variations
+
+To add the response status code, wrap `http.ResponseWriter` and record calls to `WriteHeader`. That is a separate concern from this learning version.
+
+To log every request, place logging outside the rate limiter:
+
+```go
+rateLimited, _ := limiter.NewRateLimiterMiddleware(mux, config)
+handler := logger.PrintMiddlewareHandler(rateLimited)
+```
+
+```mermaid
+flowchart LR
+    L[Logger] --> R[Rate limiter] --> M[ServeMux]
+```
+
+The archived v1 wiring instead puts the limiter outside the logger, so rejected requests are not logged by `PrintMiddleware`.
+
+Next: [the rate-limit middleware integration](./5_build_rate_limit_middleware.md).

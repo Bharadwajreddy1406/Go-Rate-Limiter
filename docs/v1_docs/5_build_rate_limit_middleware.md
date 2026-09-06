@@ -1,265 +1,106 @@
-read [logging_middleware_setup](./build_logging_middleware.md) to understand how to set up logging middleware.
+# V1: Rate-Limit Middleware Integration
 
+## Quick revision
 
-# Code Walkthrough - Rate Limiter Middleware Integration
+- Construct one limiter at startup, not one per request.
+- Use a stable request key; v1 uses `X-User-ID`.
+- Call `Allow(key)` once per request.
+- Return HTTP 429 when no token is available; otherwise forward to `next`.
 
-This section shows how the rate limiter was integrated into the HTTP request pipeline.
+## Build the handler chain
 
----
-
-# 1. Create the Router
-
-The first step is to create the application's router.
+The archived v1 server creates routes first, then wraps them:
 
 ```go
 mux := http.NewServeMux()
-```
-
-At this point, the router contains no routes and no middleware.
-
----
-
-# 2. Register Application Routes
-
-All endpoints are registered on the router before any middleware is applied.
-
-```go
 mux.HandleFunc("/hello", HelloHandler)
+
+config := limiter.Config{Capacity: 100, TokensPerSecond: 1.67}
+logging := logger.PrintMiddlewareHandler(mux)
+rateLimited, err := limiter.NewRateLimiterMiddleware(logging, config)
 ```
 
-Conceptually, the router now looks like:
-
-```text
-/hello  ---> HelloHandler
+```mermaid
+flowchart TD
+    C[Client] --> R[RateLimiterMiddleware]
+    R -->|allowed| L[PrintMiddleware]
+    R -->|empty bucket| X[429 Too Many Requests]
+    L --> M[ServeMux]
+    M --> H[HelloHandler]
 ```
 
----
-
-# 3. Configure the Rate Limiter
-
-The middleware accepts a configuration object instead of hardcoding values.
+## Construct the limiter once
 
 ```go
-config := limiter.Config{
-    Capacity:        100,
-    TokensPerSecond: 1.67,
-}
-```
-
-This keeps the middleware reusable while allowing different applications to configure different limits.
-
----
-
-# 4. Wrap Existing Handlers
-
-The router is first wrapped by the logging middleware.
-
-```go
-loggingMiddleware := logger.PrintMiddlewareHandler(mux)
-```
-
-This produces the following handler chain:
-
-```text
-Logging Middleware
-        │
-        ▼
-     ServeMux
-```
-
-Next, the logging middleware is wrapped by the rate limiter.
-
-```go
-rateLimiterMiddleware := limiter.RateLimiterMiddlewareHandler(
-    loggingMiddleware,
-    config,
-)
-```
-
-The final request pipeline becomes:
-
-```text
-RateLimiter Middleware
-          │
-          ▼
-Logging Middleware
-          │
-          ▼
-      ServeMux
-```
-
-Notice that middleware **wraps** an existing handler instead of modifying it.
-
-Each middleware receives another `http.Handler` and decides whether to continue the request.
-
----
-
-# 5. Return the Outermost Handler
-
-The middleware registration function returns the outermost handler.
-
-```go
-func registerMiddleware() http.Handler {
-    mux := http.NewServeMux()
-
-    mux.HandleFunc("/hello", HelloHandler)
-
-    config := limiter.Config{
-        Capacity:        100,
-        TokensPerSecond: 1.67,
-    }
-
-    loggingMiddleware := logger.PrintMiddlewareHandler(mux)
-
-    rateLimiterMiddleware := limiter.RateLimiterMiddlewareHandler(
-        loggingMiddleware,
-        config,
-    )
-
-    return rateLimiterMiddleware
-}
-```
-
-The caller does not know how many middleware layers exist.
-
-It simply receives an `http.Handler`.
-
----
-
-# 6. Start the Server
-
-The server only needs a single handler.
-
-```go
-func main() {
-    server := &http.Server{
-        Addr:    ":9090",
-        Handler: registerMiddleware(),
-    }
-
-    server.ListenAndServe()
-}
-```
-
-The HTTP server is completely unaware of:
-
-* routing
-* logging
-* rate limiting
-* token buckets
-
-It simply invokes:
-
-```go
-handler.ServeHTTP(w, r)
-```
-
----
-
-# 7. Middleware Construction
-
-The middleware owns a single `RateLimiter` instance.
-
-```go
-type RateLimiterMiddleware struct {
-    limiter *RateLimiter
-    next    http.Handler
-}
-```
-
-During application startup, the middleware creates the limiter exactly once.
-
-```go
-func RateLimiterMiddlewareHandler(
-    next http.Handler,
-    config Config,
-) http.Handler {
-
+func NewRateLimiterMiddleware(next http.Handler, config Config) (http.Handler, error) {
     limiter, err := NewRateLimiter(config)
     if err != nil {
-        panic(err)
+        return nil, err
     }
-
-    return &RateLimiterMiddleware{
-        limiter: limiter,
-        next:    next,
-    }
+    return &RateLimiterMiddleware{limiter: limiter, next: next}, nil
 }
 ```
 
-This ensures that:
+This is called while wiring the server. Its `RateLimiter` and bucket map live across requests.
 
-* one shared bucket map exists,
-* all requests reuse the same limiter,
-* buckets persist across requests.
+### Incorrect variation
 
-If the limiter were created inside `ServeHTTP()`, every request would receive a fresh bucket map and rate limiting would never work.
-
----
-
-# 8. Request Processing
-
-Every incoming request first passes through the middleware.
+Do not create the limiter inside `ServeHTTP`:
 
 ```go
-func (m *RateLimiterMiddleware) ServeHTTP(
-    w http.ResponseWriter,
-    r *http.Request,
-) {
-    key := r.RemoteAddr
+// Wrong: every request starts with a fresh, full map.
+limiter, _ := NewRateLimiter(config)
+```
 
+That would prevent the limiter from remembering previous requests.
+
+## Request decision
+
+```go
+func (m *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    key := r.Header.Get("X-User-ID")
     if !m.limiter.Allow(key) {
-        http.Error(
-            w,
-            "Rate limit exceeded",
-            http.StatusTooManyRequests,
-        )
+        http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
         return
     }
-
     m.next.ServeHTTP(w, r)
 }
 ```
 
-The middleware itself contains almost no business logic.
-
-Its responsibilities are limited to:
-
-1. Extract the request key.
-2. Ask the limiter whether the request is allowed.
-3. Reject or forward the request.
-
-The token bucket algorithm remains completely encapsulated inside the `RateLimiter` and `Bucket` types.
-
----
-
-# Final Request Lifecycle
-
-```text
-Client
-   │
-   ▼
-http.Server
-   │
-   ▼
-RateLimiterMiddleware
-   │
-   ├── limiter.Allow(key)
-   │
-   ├── Allowed?
-   │      │
-   │      ├── No  ─────► HTTP 429
-   │      │
-   │      └── Yes
-   │
-   ▼
-LoggerMiddleware
-   │
-   ▼
-ServeMux
-   │
-   ▼
-HelloHandler
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as RateLimiterMiddleware
+    participant L as RateLimiter
+    participant N as Next handler
+    C->>M: request with X-User-ID
+    M->>L: Allow(user ID)
+    alt token available
+        L-->>M: true
+        M->>N: next.ServeHTTP
+        N-->>C: route response
+    else bucket empty
+        L-->>M: false
+        M-->>C: 429 Rate limit exceeded
+    end
 ```
 
-This design keeps each component focused on a single responsibility while allowing middleware to be composed simply by wrapping one `http.Handler` around another.
+## Key variations
+
+The key determines who shares a bucket:
+
+| Key | Useful when | Caveat |
+| --- | --- | --- |
+| `X-User-ID` | an authenticated system has user IDs | header must be trusted/validated in production |
+| API key | clients are identified by keys | do not log secrets |
+| IP address | no authentication exists | multiple users can share one public IP |
+
+V1 uses a header to make testing simple:
+
+```bash
+curl -H 'X-User-ID: alice' http://localhost:9090/hello
+```
+
+## Final recall
+
+The route does not know rate limiting exists. The middleware decides whether the route receives a request, and `RateLimiter` owns the token-bucket state. That separation is the main design lesson from v1.

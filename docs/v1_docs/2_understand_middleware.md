@@ -1,253 +1,77 @@
-Hope You read the previous one. If not, go back and read it first.
+# V1: Middleware Is a Handler That Wraps Another Handler
 
+## Quick revision
 
-> "that method belongs to RateLimiter"
+- Middleware implements `http.Handler`.
+- It stores the next handler in the chain.
+- It can run code before and after `next.ServeHTTP`.
+- It can stop the request by writing a response and returning.
 
-✅ Correct.
+## The smallest useful shape
 
 ```go
-type RateLimiter struct {
+type PrintMiddleware struct {
     next http.Handler
 }
 
-func (rl *RateLimiter) ServeHTTP(
-    w http.ResponseWriter,
-    r *http.Request,
-) {
-    ...
+func (p *PrintMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    fmt.Println("before")
+    p.next.ServeHTTP(w, r)
+    fmt.Println("after")
 }
 ```
 
-The receiver is
+The `next` field is `http.Handler`, not `*http.ServeMux`. That is important: the next item might be a router, a route function adapted with `HandlerFunc`, or another middleware.
+
+```mermaid
+flowchart TD
+    C[Client request] --> P[PrintMiddleware ServeHTTP]
+    P -->|before| N[next.ServeHTTP]
+    N --> H[Route handler]
+    H -->|return| P
+    P -->|after| C
+```
+
+## Allow-or-stop variation
+
+Rate limiting uses the same structure, but conditionally calls `next`.
 
 ```go
-(rl *RateLimiter)
-```
-
-which means the method belongs to `*RateLimiter`.
-
----
-
-Now ask yourself:
-
-What does the `http.Handler` interface require?
-
-```go
-type Handler interface {
-    ServeHTTP(http.ResponseWriter, *http.Request)
-}
-```
-
-Does `*RateLimiter` have a method with exactly that signature?
-
-**Yes.**
-
-Therefore,
-
-```
-*RateLimiter
-      │
-Has ServeHTTP()
-      │
-      ▼
-Implements http.Handler
-```
-
-Notice something beautiful.
-
-There is **no inheritance**.
-
-There is **no `implements` keyword**.
-
-There is **no registration**.
-
-The compiler simply checks:
-
-> "Does this type have a `ServeHTTP(http.ResponseWriter, *http.Request)` method?"
-
-If yes,
-
-> "Then it satisfies `http.Handler`."
-
----
-
-# This is why middleware works
-
-Now imagine this:
-
-```go
-type RateLimiter struct {
-    next http.Handler
-}
-```
-
-What is `next`?
-
-Not a function.
-
-Not a `ServeMux`.
-
-Not a `Hello` handler.
-
-Just...
-
-```go
-http.Handler
-```
-
-That means `next` could be:
-
-* a `ServeMux`
-* a `HandlerFunc`
-* another middleware
-* a Gin adapter
-* a custom handler
-* literally **anything** that implements `ServeHTTP`.
-
-This is the power of programming to an interface.
-
----
-
-# Now imagine the request flow
-
-Suppose your middleware does:
-
-```go
-func (rl *RateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
-    if allowed {
-        rl.next.ServeHTTP(w, r)
+func (m *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    if !m.limiter.Allow(r.Header.Get("X-User-ID")) {
+        http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
         return
     }
-
-    http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+    m.next.ServeHTTP(w, r)
 }
 ```
 
-Read it in English:
-
-```
-Request arrives
-
-↓
-
-Check rate limit
-
-↓
-
-Allowed?
-
-     │
-  Yes │ No
-     │
-     ▼
-Call next handler
-
-or
-
-Return 429
+```mermaid
+flowchart TD
+    R[Request] --> L{Limiter allows it?}
+    L -->|yes| N[Call next handler]
+    L -->|no| E[Write 429 and return]
 ```
 
-That single line
+## Ordering matters
+
+The outermost middleware runs first.
 
 ```go
-rl.next.ServeHTTP(w, r)
+logging := logger.PrintMiddlewareHandler(mux)
+rateLimited, _ := limiter.NewRateLimiterMiddleware(logging, config)
 ```
 
-is what makes middleware a **chain**.
+This creates:
 
----
-
-# Here's the biggest realization
-
-Remember how the server worked?
-
-```
-Server
-
-↓
-
-handler.ServeHTTP()
+```text
+Rate limiter → logger → router → route
 ```
 
-The server doesn't know whether `handler` is:
+Therefore, a rate-limited request does not reach the logger or route in v1. Reverse the wrapping order if logging every attempted request is the requirement.
 
-* a `ServeMux`
-* a `RateLimiter`
-* a logger
-* an authentication middleware
+## Check yourself
 
-It just calls:
+The server only sees one `http.Handler`: the outermost one. Each layer decides whether to call the next layer.
 
-```go
-handler.ServeHTTP(...)
-```
-
-Now imagine the handler is actually your middleware.
-
-The server calls:
-
-```
-RateLimiter.ServeHTTP()
-
-↓
-
-RateLimiter calls
-
-next.ServeHTTP()
-
-↓
-
-ServeMux.ServeHTTP()
-
-↓
-
-HandlerFunc.ServeHTTP()
-
-↓
-
-Hello()
-```
-
-See what happened?
-
-The server thinks it's talking to **one handler**.
-
-But internally, that handler delegated to another handler, which delegated to another, and so on.
-
----
-
-# The complete chain
-
-```
-http.Server
-      │
-      ▼
-RateLimiter Middleware
-      │
-      ▼
-Logging Middleware
-      │
-      ▼
-ServeMux
-      │
-      ▼
-HandlerFunc
-      │
-      ▼
-Hello()
-```
-
-Every single box implements the same interface:
-
-```go
-type Handler interface {
-    ServeHTTP(http.ResponseWriter, *http.Request)
-}
-```
-
-That's why they are interchangeable.
-
----
-
-[Read next here](./write_these_before_middleware.md)
+Next: [build the simplest logging middleware](./3_write_these_before_middleware.md).

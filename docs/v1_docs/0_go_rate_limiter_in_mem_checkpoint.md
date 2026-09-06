@@ -1,958 +1,116 @@
-# Go Rate Limiter - Branch Notes (Checkpoint 1)
+# V1: In-Memory Token Bucket
 
-> **Checkpoint Scope**
->
-> These notes cover everything completed **before** learning `http.Handler`, `http.HandlerFunc`, and middleware.
->
-> They intentionally stop at the point where the next topic is request handling.
+> Scope: this note documents the archived first version in [`project_archives/v1_in_memory_rate_limiter`](../../project_archives/v1_in_memory_rate_limiter). V2 replaces its map with SQLite.
 
----
+## Quick revision
 
-# 1. Project Goal
+- One `RateLimiter` owns a map of `user ID → *Bucket`.
+- One `Bucket` holds a user's remaining tokens and refill time.
+- The limiter mutex protects the map; the bucket mutex protects its mutable state.
+- `Allow(key)` creates a bucket when needed, refills it, then spends one token.
 
-The objective is **not** just to build a rate limiter.
+## What problem does a token bucket solve?
 
-The objective is to learn:
+It limits the average request rate while allowing a short burst. A bucket starts full, a request spends one token, and time puts tokens back up to a maximum capacity.
 
-* Idiomatic Go
-* Go project structure
-* Packages
-* Constructors
-* Methods
-* Mutexes
-* `net/http`
-* Server architecture
-* Design thinking
+```mermaid
+flowchart LR
+    R[Request for user-42] --> B{Token available?}
+    B -- Yes --> S[Spend one token]
+    S --> A[Allow request]
+    B -- No --> D[Reject request]
+    T[Elapsed time] --> F[Refill whole tokens]
+    F --> B
+```
 
-The rate limiter is simply the project through which these concepts are learned.
+### Example
 
----
+For `Capacity: 3` and `TokensPerSecond: 1`:
 
-# 2. Project Structure
+| Time | Event | Tokens after event |
+| --- | --- | --- |
+| 0 s | bucket is created | 3 |
+| 0 s | request allowed | 2 |
+| 0 s | request allowed | 1 |
+| 0 s | request allowed | 0 |
+| 0 s | next request rejected | 0 |
+| 1 s later | one token is refilled; request allowed | 0 |
 
-Current structure
+### Variation: capacity vs refill rate
+
+`Capacity` controls the burst size. `TokensPerSecond` controls the steady rate.
+
+```go
+// Small bursts, quick recovery.
+Config{Capacity: 2, TokensPerSecond: 10}
+
+// Larger bursts, slower recovery.
+Config{Capacity: 100, TokensPerSecond: 1}
+```
+
+## The v1 structure
 
 ```text
-rate-limiter/
-
-│
-├── cmd/
-│   └── server/
-│       └── main.go
-│
-├── internal/
-│   └── limiter/
-│       ├── bucket.go
-│       ├── config.go
-│       ├── limiter.go
-│       └── bucket_test.go
-│
-├── go.mod
-└── go.sum
+cmd/server/          starts the HTTP server and builds the handler chain
+internal/limiter/    token-bucket types and rate-limit middleware
+internal/logger/     request-printing middleware
 ```
 
----
-
-## Why `cmd/`?
-
-`cmd/` contains executables.
-
-Example:
-
-```text
-cmd/
-    server/
-    worker/
-    migrate/
+```mermaid
+flowchart TD
+    Server[cmd/server] --> Middleware[RateLimiterMiddleware]
+    Middleware --> Limiter[RateLimiter]
+    Limiter --> Map["map: user ID to Bucket"]
+    Map --> Bucket[one Bucket per user]
+    Middleware --> Logger[PrintMiddleware]
+    Logger --> Router[http.ServeMux]
+    Router --> Hello[HelloHandler]
 ```
 
-Each folder produces one executable.
-
-```
-go build ./cmd/server
-```
-
-↓
-
-```
-server
-```
-
-```
-go build ./cmd/worker
-```
-
-↓
-
-```
-worker
-```
-
-This keeps entry points separate and scales well.
-
----
-
-## Why `internal/`?
-
-`internal/` contains implementation details.
-
-Packages inside `internal` **cannot be imported by other Go modules**.
-
-This lets us hide implementation details.
-
-Everything related to the token bucket lives inside
-
-```
-internal/limiter
-```
-
----
-
-# 3. Module vs Package
-
-## Module
-
-A module is the entire project.
-
-```
-go.mod
-```
-
-defines the module root.
-
-Example
-
-```
-module rate-limiter
-```
-
----
-
-## Package
-
-A package is a collection of Go files.
-
-Example
-
-```
-internal/limiter/
-```
-
-contains
-
-```
-bucket.go
-
-config.go
-
-limiter.go
-```
-
-All belong to
+## The core types
 
 ```go
-package limiter
-```
-
-Go compiles all files belonging to the same package together.
-
----
-
-# 4. Go Constructors
-
-Go has no constructors.
-
-Instead, constructors are ordinary functions.
-
-Example
-
-```go
-func NewBucket(config Config) *Bucket
-```
-
-Convention:
-
-```
-New<Type>()
-```
-
-Examples from Go itself
-
-```
-http.NewServeMux()
-
-bufio.NewReader()
-
-bytes.NewBuffer()
-```
-
----
-
-# 5. Keyed Struct Literals
-
-Preferred
-
-```go
-return &Bucket{
-    Tokens: config.Capacity,
-    Capacity: config.Capacity,
+type Config struct {
+    Capacity        int
+    TokensPerSecond float64
 }
-```
 
-Avoid
-
-```go
-return &Bucket{
-    config.Capacity,
-    config.Capacity,
+type RateLimiter struct {
+    config  Config
+    buckets map[string]*Bucket
+    mu      sync.RWMutex
 }
-```
 
-Reasons
-
-* easier to read
-* compiler catches mistakes
-* survives field reordering
-* self-documenting
-
----
-
-# 6. Bucket Design
-
-## Responsibility
-
-A bucket represents **one user's token bucket**.
-
-It knows
-
-* current tokens
-* refill configuration
-* refill time
-* synchronization
-
-It does **not** know
-
-* HTTP
-* maps
-* users
-* middleware
-
----
-
-## Final Bucket
-
-```go
 type Bucket struct {
     Tokens          int
     Capacity        int
     TokensPerSecond float64
     LastRefillAt    time.Time
-
-    mu sync.Mutex
+    mu              sync.Mutex
 }
 ```
 
----
+`Config.Validate` rejects non-positive capacity and refill rates before a limiter is constructed.
 
-## Fields
+## Why are there two mutexes?
 
-### Tokens
+They protect different shared resources. A single global mutex would work, but it would unnecessarily block requests for different users while one bucket is being refilled.
 
-Current available tokens.
-
-Example
-
-```
-67
-```
-
----
-
-### Capacity
-
-Maximum bucket size.
-
-Example
-
-```
-100
-```
-
-Tokens can never exceed capacity.
-
----
-
-### TokensPerSecond
-
-Refill rate.
-
-Example
-
-```
-1.5 tokens/second
-```
-
----
-
-### LastRefillAt
-
-Time when refill calculation last advanced.
-
-Used to calculate elapsed time.
-
----
-
-### mu
-
-Protects bucket state.
-
-Protects
-
-* Tokens
-* LastRefillAt
-
-Only one goroutine may modify them at once.
-
----
-
-# 7. Config
-
-```go
-type Config struct {
-    Capacity int
-
-    TokensPerSecond float64
-}
-```
-
-Configuration is validated once.
-
-```go
-func (c Config) Validate() error
-```
-
-Validation happens inside
-
-```
-NewRateLimiter()
-```
-
----
-
-# 8. RateLimiter Design
-
-## Responsibility
-
-RateLimiter manages buckets.
-
-It does **not** implement the token bucket algorithm.
-
-It only
-
-* stores buckets
-* creates buckets
-* returns buckets
-
----
-
-## Final Structure
-
-```go
-type RateLimiter struct {
-    config Config
-
-    buckets map[string]*Bucket
-
-    mu sync.RWMutex
-}
-```
-
----
-
-## Fields
-
-### config
-
-Shared configuration.
-
-Every bucket uses the same configuration.
-
----
-
-### buckets
-
-```
-userID
-
-↓
-
-Bucket
-```
-
-Example
-
-```
-alice
-
-↓
-
-Bucket
-```
-
----
-
-### mu
-
-Protects the buckets map.
-
-Not the buckets themselves.
-
----
-
-# 9. Why Two Mutexes?
-
-This is one of the most important concepts.
-
-We have two different shared resources.
-
----
-
-## Resource 1
-
-The users map
-
-```go
-buckets map[string]*Bucket
-```
-
-Needs protection.
-
-Example
-
-```
-User A arrives
-
-↓
-
-Create Bucket
-```
-
-At the same time
-
-```
-User A arrives again
-
-↓
-
-Create Bucket
-```
-
-Without synchronization
-
-Both goroutines create separate buckets.
-
-The map becomes inconsistent.
-
-Therefore
-
-```
-RateLimiter.mu
-```
-
-protects the map.
-
----
-
-## Resource 2
-
-The Bucket
-
-Inside a bucket
-
-```
-Tokens
-
-LastRefillAt
-```
-
-Multiple requests for the same user may arrive simultaneously.
-
-Without synchronization
-
-```
-Request A
-
-↓
-
-Tokens--
-
-Request B
-
-↓
-
-Tokens--
-```
-
-Both modify the same memory.
-
-Therefore
-
-```
-Bucket.mu
-```
-
-protects bucket state.
-
----
-
-## Summary
-
-```
-RateLimiter.mu
-
-↓
-
-Protects map
-
-
-Bucket.mu
-
-↓
-
-Protects bucket
-```
-
-Different resources.
-
-Different mutexes.
-
----
-
-# 10. Mutex vs RWMutex
-
-## Mutex
-
-```
-Lock()
-
-Unlock()
-```
-
-Only one goroutine may enter.
-
-Everyone else waits.
-
-Useful when
-
-* writing
-* modifying
-
----
-
-## RWMutex
-
-Adds
-
-```
-RLock()
-
-RUnlock()
-```
-
-Multiple readers may read simultaneously.
-
-Only writers require exclusive access.
-
----
-
-Example
-
-Many requests
-
-```
-Find bucket
-```
-
-Reading only.
-
-These can happen together.
-
-Creating a bucket
-
-```
-Write
-```
-
-Needs exclusive access.
-
-Hence
-
-```
-RWMutex
-```
-
-is ideal for the map.
-
----
-
-# 11. Double-Checked Locking
-
-Algorithm
-
-```
-RLock
-
-↓
-
-Bucket exists?
-
-↓
-
-Yes
-
-↓
-
-Return
-
-------------------
-
-No
-
-↓
-
-Unlock
-
-↓
-
-Lock
-
-↓
-
-Check again
-
-↓
-
-Still missing?
-
-↓
-
-Create
-```
-
-Why check twice?
-
-Two goroutines may observe
-
-```
-Bucket missing
-```
-
-simultaneously.
-
-The second check prevents duplicate creation.
-
----
-
-# 12. Bucket API
-
-Public
-
-```go
-Allow()
-```
-
-Private
-
-```go
-refill()
-```
-
-Reason
-
-Outside packages should only ask
-
-```
-Can this request proceed?
-```
-
-They should never manually refill buckets.
-
----
-
-# 13. Request Algorithm
-
-```
-Allow()
-
-↓
-
-Lock
-
-↓
-
-refill()
-
-↓
-
-Tokens > 0 ?
-
-↓
-
-Yes
-
-↓
-
-Consume
-
-↓
-
-Return true
-
-------------------
-
-No
-
-↓
-
-Return false
-
-↓
-
-Unlock
-```
-
----
-
-# 14. getOrCreateBucket()
-
-Algorithm
-
-```
-Read Lock
-
-↓
-
-Exists?
-
-↓
-
-Return
-
-------------------
-
-No
-
-↓
-
-Write Lock
-
-↓
-
-Check Again
-
-↓
-
-Create
-
-↓
-
-Return
-```
-
----
-
-# 15. Public RateLimiter API
-
-```go
-Allow(key string)
-```
-
-Internally
-
-```
-bucket := getOrCreateBucket(key)
-
-↓
-
-bucket.Allow()
-```
-
-The outside world never knows buckets exist.
-
----
-
-# 16. Default ServeMux
-
-When writing
-
-```go
-http.HandleFunc("/hello", HelloHandler)
-```
-
-Go registers the route in
-
-```
-http.DefaultServeMux
-```
-
-This is a global router.
-
-Later
-
-```go
-http.ListenAndServe(":8080", nil)
-```
-
-Passing
-
-```go
-nil
-```
-
-means
-
-```
-Use DefaultServeMux
-```
-
-Internally, it's conceptually similar to
-
-```go
-http.ListenAndServe(":8080", http.DefaultServeMux)
-```
-
----
-
-## Request Flow
-
-```
-Browser
-
-↓
-
-Operating System
-
-↓
-
-Port 8080
-
-↓
-
-DefaultServeMux
-
-↓
-
-Matching Handler
-```
-
----
-
-# 17. Custom ServeMux
-
-Instead of relying on the global router
-
-```go
-mux := http.NewServeMux()
-```
-
-Routes become
-
-```go
-mux.HandleFunc("/hello", HelloHandler)
-```
-
-Server
-
-```go
-server := &http.Server{
-    Addr: ":8080",
-    Handler: mux,
-}
-```
-
-Advantages
-
-* explicit ownership
-* no global state
-* easier testing
-* multiple routers possible
-* better for middleware
-
-This is the preferred production approach.
-
----
-
-# 18. Server vs ServeMux
-
-These are different concepts.
-
-## http.Server
-
-Responsible for
-
-* listening on ports
-* accepting TCP connections
-* server configuration
-* lifecycle
-
-It does **not** decide which handler runs.
-
----
-
-## ServeMux
-
-Responsible for routing.
-
-Receives
-
+```mermaid
+flowchart TD
+    L[RateLimiter.mu] --> M[Protects buckets map]
+    B[Bucket.mu] --> S[Protects Tokens and LastRefillAt]
+    M --> C[Create or find user bucket]
+    S --> R[Refill and consume safely]
 ```
-GET /hello
-```
-
-Chooses
-
-```
-HelloHandler
-```
-
-Think of it as a routing table.
-
----
-
-# 19. Final Architecture
-
-```
-Internet
-     │
-     ▼
-Operating System
-     │
-     ▼
-http.Server
-     │
-     ▼
-ServeMux
-     │
-     ▼
-RateLimiter
-     │
-     ▼
-Bucket
-     │
-     ▼
-Token Algorithm
-```
-
-Each layer has one responsibility.
 
----
+| Situation | Lock needed | Why |
+| --- | --- | --- |
+| Look up or add a user bucket | `RateLimiter.mu` | Go maps are not safe for concurrent writes. |
+| Change tokens for one user | `Bucket.mu` | Two requests must not spend the same token. |
 
-# 20. Next Topic
+## A useful mental model
 
-The next learning milestone is:
+The limiter manages **which bucket** belongs to a user. The bucket manages **how many tokens** that user has. Keeping those jobs separate is what makes the v1 design easy to reason about.
 
-* `http.Handler`
-* `http.HandlerFunc`
-* Middleware
-* Request pipeline
-* Integrating the RateLimiter into the HTTP server
+Next: [HTTP handlers and `HandlerFunc`](./1_http_handler_and_handler_func.md).
