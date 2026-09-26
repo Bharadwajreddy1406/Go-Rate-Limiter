@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 
 	redisdb "rate-limiter/internal/redis"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		fmt.Println("Error loading .env:", err)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

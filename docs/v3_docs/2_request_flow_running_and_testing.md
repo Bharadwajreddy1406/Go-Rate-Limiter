@@ -111,7 +111,17 @@ Expected Redis response:
 PONG
 ```
 
-### 2. Start the Go server
+### 2. Create the local environment file
+
+Copy the tracked example:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The repository already includes a local `.env` for development, but this command is what a new clone should use. Edit `.env` if Redis is not using the default address or credentials.
+
+### 3. Start the Go server
 
 ```powershell
 go run ./cmd/server
@@ -125,7 +135,7 @@ Server is running on port 9090
 
 The process first gives Redis five seconds to answer `PING`. If that check fails, the HTTP server does not start.
 
-### 3. Send a request
+### 4. Send a request
 
 PowerShell with `curl.exe`:
 
@@ -142,6 +152,8 @@ http://localhost:9090
 The browser chooses a demo user and sends the same `X-User-ID` header to `/hello`.
 
 ## Redis connection configuration
+
+The server calls `godotenv.Load()` before creating the Redis client. This loads values from the root `.env` file. Variables already defined by the operating system are not overwritten, which makes deployment-level configuration take priority over local defaults.
 
 All settings are optional for local development.
 
@@ -161,6 +173,15 @@ go run ./cmd/server
 ```
 
 `REDIS_DB` must be a non-negative integer. Invalid input is rejected during startup instead of silently connecting to the wrong database.
+
+### Files and Git behavior
+
+| File | Committed? | Purpose |
+| --- | --- | --- |
+| `.env.example` | Yes | Documents every required setting with safe local defaults |
+| `.env` | No | Holds settings or credentials for one developer's machine |
+
+When a new setting is introduced, add its name and a safe placeholder to `.env.example`. Put real secrets only in `.env` or in the deployment environment.
 
 ## Watch the bucket change
 

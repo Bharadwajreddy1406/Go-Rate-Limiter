@@ -30,6 +30,12 @@ Start Redis in Docker Desktop:
 docker compose up -d
 ```
 
+Create your local environment file if it does not already exist:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 Start the Go server:
 
 ```bash
@@ -42,14 +48,16 @@ Open <http://localhost:9090> for the browser demo, or call the API directly:
 curl -i -H "X-User-ID: ramu" http://localhost:9090/hello
 ```
 
-The default Redis address is `localhost:6379`. These optional environment variables can override the connection:
+The server loads `.env` automatically. `.env.example` contains safe defaults for the local Docker Redis service:
 
-```text
-REDIS_ADDR
-REDIS_USERNAME
-REDIS_PASSWORD
-REDIS_DB
+```dotenv
+REDIS_ADDR=localhost:6379
+REDIS_USERNAME=
+REDIS_PASSWORD=
+REDIS_DB=0
 ```
+
+The real `.env` file is ignored by Git so credentials are not committed. Existing operating-system environment variables take priority over values in `.env`.
 
 ## API behavior
 
