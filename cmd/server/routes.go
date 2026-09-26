@@ -1,9 +1,10 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
+
+	"github.com/redis/go-redis/v9"
 
 	"rate-limiter/internal/limiter"
 	"rate-limiter/internal/logger"
@@ -15,7 +16,6 @@ func HelloHandler(w http.ResponseWriter, r *http.Request) {
 
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ponytail: demo-only wildcard; restrict allowed origins before adding authentication.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "X-User-ID")
 		if r.Method == http.MethodOptions {
@@ -27,9 +27,7 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
-func registerMiddleware(db *sql.DB) (http.Handler, error) {
-	// Correct Steps to build a Middleware
-
+func registerMiddleware(client *redis.Client) (http.Handler, error) {
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/hello", HelloHandler)
 
@@ -38,13 +36,10 @@ func registerMiddleware(db *sql.DB) (http.Handler, error) {
 		TokensPerSecond: 1.67,
 	}
 
-	// Wrap the router with middlewares
-
 	printMiddleware := logger.PrintMiddlewareHandler(apiMux)
-	rateLimiterMiddleware, err := limiter.NewRateLimiterMiddleware(printMiddleware, db, config)
+	rateLimiterMiddleware, err := limiter.NewRateLimiterMiddleware(printMiddleware, client, config)
 	if err != nil {
-		fmt.Println("Error creating rate limiter middleware:", err)
-		return nil, err
+		return nil, fmt.Errorf("create rate limiter middleware: %w", err)
 	}
 
 	mux := http.NewServeMux()

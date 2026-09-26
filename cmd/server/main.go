@@ -1,23 +1,26 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 
-	sqlitedb "rate-limiter/internal/sqlite"
+	redisdb "rate-limiter/internal/redis"
 )
 
 func main() {
-	fmt.Println("Server is running on port", Port)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	db, err := sqlitedb.Open()
+	client, err := redisdb.Open(ctx)
 	if err != nil {
-		fmt.Println("Error opening database:", err)
+		fmt.Println("Error opening Redis:", err)
 		return
 	}
-	defer db.Close()
+	defer client.Close()
 
-	handler, err := registerMiddleware(db)
+	handler, err := registerMiddleware(client)
 	if err != nil {
 		fmt.Println("Error registering middleware:", err)
 		return
@@ -28,6 +31,7 @@ func main() {
 		Handler: handler,
 	}
 
+	fmt.Println("Server is running on port", Port)
 	if err := server.ListenAndServe(); err != nil {
 		fmt.Println("Error starting server:", err)
 	}

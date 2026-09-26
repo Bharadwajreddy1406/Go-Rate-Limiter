@@ -1,82 +1,119 @@
 # Go Rate Limiter
 
-I am building this project while learning Go. The changes are intentionally incremental: each version keeps the token-bucket behavior while replacing the storage and deployment model underneath it. The current version limits requests to `/hello` independently by the `X-User-ID` header.
+This project is a token-bucket rate limiter built in small versions so each storage change is easy to understand.
 
-## Learning path
+1. Version 1 stored buckets in a Go map.
+2. Version 2 stored buckets in SQLite.
+3. Version 3, the current version, stores buckets in Redis.
 
-1. **Done — in-memory limiter:** one Go process held user buckets in a map, protected with mutexes. The original implementation is kept in `project_archives/v1_in_memory_rate_limiter`.
-2. **Current — SQLite limiter:** bucket state is persisted in `rate-limiter.db`, and each refill/consume operation is a SQLite transaction.
-3. **Next — Redis limiter:** move bucket state from a local database to Redis.
-4. **Later — distributed limiter:** share the Redis-backed limit across multiple server instances instead of having a separate limiter per server.
+The earlier implementations are kept in `project_archives/`. The root of the repository always contains the current version.
+
+## How version 3 works
+
+Every value from the `X-User-ID` header gets its own token bucket. Redis stores that bucket as a hash:
+
+```text
+rate-limiter:bucket:<user-id>
+  tokens
+  last_refill_at
+```
+
+One Lua script performs the refill, availability check, token consumption, update, and expiry. Redis runs the script atomically, so concurrent requests and multiple Go server instances cannot consume the same token.
+
+Inactive bucket keys expire after the time required to refill to full capacity. Removing such a key is safe because the next request should receive a full bucket anyway.
 
 ## Run it
 
-Requires the Go version declared in `go.mod`.
+Start Redis in Docker Desktop:
+
+```bash
+docker compose up -d
+```
+
+Start the Go server:
 
 ```bash
 go run ./cmd/server
 ```
 
-Open <http://localhost:9090> for the browser demo. It picks a user from a fixed list and calls `/hello` with that user's `X-User-ID` header.
-
-You can also test the API directly:
+Open <http://localhost:9090> for the browser demo, or call the API directly:
 
 ```bash
-curl -i -H 'X-User-ID: ramu' http://localhost:9090/hello
+curl -i -H "X-User-ID: ramu" http://localhost:9090/hello
 ```
 
-## API
+The default Redis address is `localhost:6379`. These optional environment variables can override the connection:
 
-### `GET /hello`
+```text
+REDIS_ADDR
+REDIS_USERNAME
+REDIS_PASSWORD
+REDIS_DB
+```
 
-| Header | Required | Description |
-| --- | --- | --- |
-| `X-User-ID` | Yes | The key used for this user's rate-limit bucket. |
+## API behavior
+
+`GET /hello` requires an `X-User-ID` header.
 
 | Result | Status | Response |
 | --- | --- | --- |
-| Request allowed | `200 OK` | `Hello World!` |
+| Token available | `200 OK` | `Hello World!` |
 | Header missing or blank | `400 Bad Request` | `X-User-ID header is required` |
-| User has no tokens | `429 Too Many Requests` | `Rate limit exceeded` |
-| Database failure | `500 Internal Server Error` | `Internal server error` |
+| Bucket empty | `429 Too Many Requests` | `Rate limit exceeded` |
+| Redis unavailable | `500 Internal Server Error` | `Internal server error` |
 
-The page shows a clear “user is rate limited” message when it receives `429`.
+The limiter currently gives each user 100 tokens and refills 1.67 tokens per second. Change these values in `cmd/server/routes.go`.
 
-## Rate-limit behavior
+## Test it
 
-The current configuration is in `cmd/server/routes.go`:
+Unit tests run without Redis. Integration tests run when `REDIS_TEST_ADDR` is set.
 
-- Capacity: 100 tokens per user
-- Refill rate: 1.67 tokens per second
-- Each allowed request consumes one token
+PowerShell:
 
-Every token update uses a SQLite transaction, so the bucket update is stored atomically. The server logs the user ID and token count before and after allowed requests.
+```powershell
+$env:REDIS_TEST_ADDR = "localhost:6379"
+go test ./...
+go vet ./...
+```
 
-## Database
+The integration tests use Redis database 15 and delete only the unique keys they create.
 
-Starting the server creates `rate-limiter.db` in the repository root. It stores a `buckets` table containing each user key, remaining tokens, and refill timestamp.
+## Detailed documentation
 
-The file is ignored by Git and survives server restarts. Delete `rate-limiter.db` while the server is stopped to reset all buckets. Tests use an in-memory database and do not touch this file.
+The Version 3 guide contains diagrams, worked examples, and operational notes:
 
-## Browser demo and Live Server
+1. [Redis architecture](docs/v3_docs/0_redis_rate_limiter.md)
+2. [Atomic token-bucket algorithm](docs/v3_docs/1_atomic_token_bucket_algorithm.md)
+3. [Request flow, running, testing, and observing](docs/v3_docs/2_request_flow_running_and_testing.md)
 
-The Go server serves `web/index.html` at `/`, so no separate frontend server is required.
+## Useful commands
 
-If you use VS Code Live Server instead, keep the Go server running too. The page calls `http://localhost:9090/hello` directly and the API permits the `X-User-ID` browser header with demo-only CORS settings.
-
-## Test
+Inspect rate-limit keys:
 
 ```bash
-go test ./...
+docker compose exec redis redis-cli --scan --pattern "rate-limiter:bucket:*"
+```
+
+Stop Redis while keeping its data:
+
+```bash
+docker compose down
+```
+
+Stop Redis and reset its data:
+
+```bash
+docker compose down -v
 ```
 
 ## Project layout
 
 ```text
-cmd/server/          HTTP server and route wiring
-internal/limiter/    Rate-limiter middleware and configuration
-internal/repository/ SQLite token-bucket transaction
-internal/sqlite/     Database setup
-web/                 Browser demo
-docs/                Learning notes for the in-memory and SQLite versions
+cmd/server/           HTTP server and route wiring
+internal/limiter/     Configuration and HTTP middleware
+internal/repository/  Atomic Redis token-bucket operation
+internal/redis/       Redis connection setup
+web/                  Browser demo
+docs/                 Notes for each learning version
+project_archives/     Complete older implementations
 ```

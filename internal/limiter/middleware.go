@@ -1,10 +1,11 @@
 package limiter
 
 import (
-	"database/sql"
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type RateLimiterMiddleware struct {
@@ -12,9 +13,8 @@ type RateLimiterMiddleware struct {
 	next    http.Handler
 }
 
-func NewRateLimiterMiddleware(next http.Handler, db *sql.DB, config Config) (http.Handler, error) {
-	limiter, err := NewRateLimiter(db, config)
-
+func NewRateLimiterMiddleware(next http.Handler, client *redis.Client, config Config) (http.Handler, error) {
+	limiter, err := NewRateLimiter(client, config)
 	if err != nil {
 		return nil, err
 	}
@@ -32,30 +32,25 @@ func (rtlm *RateLimiterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	tokens, err := rtlm.limiter.GetTokens(r.Context(), key)
+	decision, err := rtlm.limiter.Allow(r.Context(), key)
 	if err != nil {
 		log.Printf("rate limiter: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("rate limiter: user_id=%q tokens_before=%d", key, tokens)
 
-	allowed, err := rtlm.limiter.Allow(r.Context(), key)
-	if err != nil {
-		log.Printf("rate limiter: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	if !allowed {
+	log.Printf(
+		"rate limiter: user_id=%q tokens_before=%d tokens_after=%d allowed=%t",
+		key,
+		decision.TokensBefore,
+		decision.TokensAfter,
+		decision.Allowed,
+	)
+
+	if !decision.Allowed {
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
-	rtlm.next.ServeHTTP(w, r)
 
-	tokens, err = rtlm.limiter.GetTokens(r.Context(), key)
-	if err != nil {
-		log.Printf("rate limiter: %v", err)
-		return
-	}
-	log.Printf("rate limiter: user_id=%q tokens_after=%d", key, tokens)
+	rtlm.next.ServeHTTP(w, r)
 }

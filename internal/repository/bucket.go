@@ -2,30 +2,80 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"time"
+	"math"
+
+	"github.com/redis/go-redis/v9"
 )
 
-type BucketRepository struct {
-	db              *sql.DB
-	capacity        int
-	tokensPerSecond float64
+const bucketKeyPrefix = "rate-limiter:bucket:"
+
+var allowScript = redis.NewScript(`
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local tokens_per_second = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+
+local redis_time = redis.call("TIME")
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local bucket = redis.call("HMGET", key, "tokens", "last_refill_at")
+
+local tokens = capacity
+local last_refill_at = now_ms
+
+if bucket[1] then
+    tokens = tonumber(bucket[1])
+    last_refill_at = tonumber(bucket[2])
+
+    local elapsed_ms = math.max(0, now_ms - last_refill_at)
+    local tokens_to_add = math.floor(elapsed_ms * tokens_per_second / 1000)
+
+    if tokens_to_add > 0 then
+        tokens = math.min(capacity, tokens + tokens_to_add)
+        last_refill_at = last_refill_at + (tokens_to_add / tokens_per_second * 1000)
+    end
+end
+
+local tokens_before = tokens
+local allowed = 0
+
+if tokens > 0 then
+    tokens = tokens - 1
+    allowed = 1
+end
+
+redis.call("HSET", key, "tokens", tokens, "last_refill_at", last_refill_at)
+redis.call("PEXPIRE", key, ttl_ms)
+
+return {allowed, tokens_before, tokens}
+`)
+
+type Decision struct {
+	Allowed      bool
+	TokensBefore int
+	TokensAfter  int
 }
 
-func NewBucketRepository(db *sql.DB, capacity int, tokensPerSecond float64) *BucketRepository {
+type BucketRepository struct {
+	client          *redis.Client
+	capacity        int
+	tokensPerSecond float64
+	ttlMilliseconds int64
+}
+
+func NewBucketRepository(client *redis.Client, capacity int, tokensPerSecond float64) *BucketRepository {
 	return &BucketRepository{
-		db:              db,
+		client:          client,
 		capacity:        capacity,
 		tokensPerSecond: tokensPerSecond,
+		ttlMilliseconds: max(1, int64(math.Ceil(float64(capacity)/tokensPerSecond*1000))),
 	}
 }
 
 func (r *BucketRepository) GetTokens(ctx context.Context, key string) (int, error) {
-	var tokens int
-	err := r.db.QueryRowContext(ctx, "SELECT tokens FROM buckets WHERE key = ?", key).Scan(&tokens)
-	if errors.Is(err, sql.ErrNoRows) {
+	tokens, err := r.client.HGet(ctx, bucketKeyPrefix+key, "tokens").Int()
+	if errors.Is(err, redis.Nil) {
 		return r.capacity, nil
 	}
 	if err != nil {
@@ -34,60 +84,25 @@ func (r *BucketRepository) GetTokens(ctx context.Context, key string) (int, erro
 	return tokens, nil
 }
 
-func (r *BucketRepository) Allow(ctx context.Context, key string) (bool, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+func (r *BucketRepository) Allow(ctx context.Context, key string) (Decision, error) {
+	values, err := allowScript.Run(
+		ctx,
+		r.client,
+		[]string{bucketKeyPrefix + key},
+		r.capacity,
+		r.tokensPerSecond,
+		r.ttlMilliseconds,
+	).Int64Slice()
 	if err != nil {
-		return false, fmt.Errorf("begin bucket transaction: %w", err)
+		return Decision{}, fmt.Errorf("run bucket script: %w", err)
 	}
-	defer tx.Rollback()
-
-	now := time.Now()
-	var tokens int
-	var lastRefillAt int64
-	err = tx.QueryRowContext(ctx,
-		"SELECT tokens, last_refill_at FROM buckets WHERE key = ?", key,
-	).Scan(&tokens, &lastRefillAt)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO buckets (key, tokens, last_refill_at) VALUES (?, ?, ?)",
-			key, r.capacity-1, now.UnixNano(),
-		)
-		if err != nil {
-			return false, fmt.Errorf("insert bucket: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return false, fmt.Errorf("commit bucket: %w", err)
-		}
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read bucket: %w", err)
+	if len(values) != 3 {
+		return Decision{}, fmt.Errorf("run bucket script: expected 3 values, got %d", len(values))
 	}
 
-	elapsed := now.Sub(time.Unix(0, lastRefillAt)).Seconds()
-	tokensToAdd := int(elapsed * r.tokensPerSecond)
-	if tokensToAdd > 0 {
-		tokens = min(r.capacity, tokens+tokensToAdd)
-		refillDuration := time.Duration(float64(tokensToAdd) / r.tokensPerSecond * float64(time.Second))
-		lastRefillAt = time.Unix(0, lastRefillAt).Add(refillDuration).UnixNano()
-	}
-
-	allowed := tokens > 0
-	if allowed {
-		tokens--
-	}
-
-	_, err = tx.ExecContext(ctx,
-		"UPDATE buckets SET tokens = ?, last_refill_at = ? WHERE key = ?",
-		tokens, lastRefillAt, key,
-	)
-	if err != nil {
-		return false, fmt.Errorf("update bucket: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit bucket: %w", err)
-	}
-
-	return allowed, nil
+	return Decision{
+		Allowed:      values[0] == 1,
+		TokensBefore: int(values[1]),
+		TokensAfter:  int(values[2]),
+	}, nil
 }

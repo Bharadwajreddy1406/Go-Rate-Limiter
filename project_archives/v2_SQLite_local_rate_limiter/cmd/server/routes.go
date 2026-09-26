@@ -15,7 +15,6 @@ func HelloHandler(w http.ResponseWriter, r *http.Request) {
 
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// ponytail: demo-only wildcard; restrict allowed origins before adding authentication.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "X-User-ID")
 		if r.Method == http.MethodOptions {
